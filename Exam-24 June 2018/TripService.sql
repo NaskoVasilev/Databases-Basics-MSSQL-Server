@@ -161,3 +161,135 @@ FROM Cities AS c
 WHERE YEAR(t.BookDate) = 2016
 GROUP BY c.[Name], c.Id
 ORDER BY [Total Revenue] DESC, [Trips] DESC
+
+-- 14. Trip Revenues
+SELECT 
+	t.Id,
+	h.[Name] AS [HotelName],
+	r.[Type],
+	CASE
+	WHEN t.CancelDate IS NULL THEN SUM(h.BaseRate + r.Price)
+	ELSE 0
+	END  AS Revenue
+FROM Trips AS t
+	JOIN Rooms AS r ON r.Id = t.RoomId
+	JOIN Hotels AS h ON h.Id = r.HotelId
+	JOIN AccountsTrips AS at On at.TripId = t.Id
+GROUP BY t.Id, h.[Name], r.[Type], t.CancelDate
+ORDER BY r.Type, t.Id
+
+-- 15. Top Travelers
+SELECT AccountsRank.Id, AccountsRank.Email, AccountsRank.CountryCode, AccountsRank.Trips FROM
+(SELECT
+	a.Id,
+	a.Email,
+	c.CountryCode,
+	COUNT(a.Id) AS [Trips],
+	ROW_NUMBER() OVER (PARTITION BY c.CountryCode ORDER BY COUNT(a.Id) DESC) AS [RankedTrips]
+FROM Accounts AS a
+	JOIN AccountsTrips AS at ON at.AccountId = a.Id
+	JOIN Trips AS t ON t.Id = at.TripId
+	JOIN Rooms AS r ON r.Id = t.RoomId
+	JOIN Hotels AS h ON h.Id = r.HotelId
+	JOIN Cities AS c ON c.Id = h.CityId
+GROUP BY a.Id, a.Email, c.CountryCode) AS AccountsRank
+WHERE AccountsRank.RankedTrips = 1
+ORDER BY AccountsRank.Trips DESC, AccountsRank.Id
+
+-- 16. Luggage Fees
+SELECT 
+	TripId, 
+	SUM(Luggage) AS Luggage,
+	CASE
+	WHEN SUM(Luggage) > 5 THEN '$' + CAST(SUM(Luggage) * 5 AS VARCHAR(10))
+	ELSE '$' + CAST(0 AS VARCHAR(10))
+	END AS Fee
+FROM AccountsTrips
+WHERE Luggage > 0
+GROUP BY TripId
+ORDER BY Luggage DESC
+
+-- 17. GDPR Violation
+SELECT 
+	t.Id,
+	a.FirstName + ' ' + ISNULL(a.MiddleName + ' ', '') + a.LastName AS [Full Name],
+	ac.[Name] AS [From],
+	hc.[Name] AS [To],
+	IIF(t.CancelDate IS NULL, CAST(DATEDIFF(DAY, t.ArrivalDate, t.ReturnDate) AS VARCHAR(10)) + ' days', 'Canceled') AS [Duration]
+FROM Accounts AS a
+	JOIN Cities AS ac ON ac.Id = a.CityId
+	JOIN AccountsTrips AS at ON at.AccountId = a.Id
+	JOIN Trips AS t ON t.Id = at.TripId
+	JOIN Rooms AS r ON r.Id = t.RoomId	
+	JOIN Hotels AS h ON h.Id = r.HotelId
+	JOIN Cities AS hc ON hc.Id = h.CityId
+ORDER BY [Full Name], t.Id
+GO
+
+-- Section 4. Programmability (14 pts)
+-- 18. Available Room
+CREATE FUNCTION udf_GetAvailableRoom(@HotelId INT, @Date DATE, @People INT)
+RETURNS NVARCHAR(100)
+AS
+BEGIN
+	DECLARE @roomId INT = 
+	(SELECT TOP(1) r.Id FROM Rooms AS r
+		JOIN Trips AS t ON t.RoomId = r.Id
+	WHERE @Date NOT BETWEEN ArrivalDate AND ReturnDate AND t.CancelDate IS NULL AND r.HotelId = @HotelId AND r.Beds >= @People
+	ORDER BY r.Price DESC)
+
+	IF(@roomId IS NULL)
+	BEGIN
+		RETURN 'No rooms available'
+	END
+
+	DECLARE @count INT = (SELECT COUNT(*) FROM Trips WHERE RoomId = @roomId AND @Date BETWEEN ArrivalDate AND ReturnDate)
+
+	IF(@count > 0)
+	BEGIN
+		RETURN 'No rooms available'
+	END
+
+	DECLARE @roomType NVARCHAR(20) = (SELECT Type FROM Rooms WHERE Id = @roomId)
+	DECLARE @beds INT = (SELECT Beds FROM Rooms WHERE Id = @roomId)
+	DECLARE @price DECIMAL(15, 2) = (SELECT Price FROM Rooms WHERE Id = @roomId)
+	DECLARE @hotelBaseRate DECIMAL(15, 2) = (SELECT BaseRate FROM Hotels WHERE Id = @HotelId)
+	DECLARE @totalPrice DECIMAL(15, 2) = (@hotelBaseRate + @price) * @People
+
+	RETURN CONCAT('Room ', @roomId, ': ', @roomType, ' (', @beds, ' beds)', ' - ', '$', @totalPrice)
+END
+GO
+
+-- 19. Switch Room
+CREATE PROCEDURE usp_SwitchRoom(@TripId INT, @TargetRoomId INT)
+AS
+BEGIN
+	DECLARE @targetHotelId INT = (SELECT HotelId FROM Rooms WHERE Id = @TargetRoomId)
+	DECLARE @currentHotelId INT = (SELECT TOP(1) r.HotelId FROM Trips AS t
+									JOIN Rooms AS r ON r.Id = t.RoomId
+									WHERE t.Id = @TripId)
+
+	IF(@targetHotelId <> @currentHotelId)
+	BEGIN
+		RAISERROR('Target room is in another hotel!', 16, 1)
+		RETURN
+	END
+
+	DECLARE @targetRoomBeds INT =  (SELECT Beds FROM Rooms WHERE Id = @TargetRoomId)
+	DECLARE @accountsCount INT = (SELECT COUNT(*) FROM AccountsTrips WHERE TripId = @TripId)
+	IF(@accountsCount > @targetRoomBeds)
+	BEGIN
+		RAISERROR('Not enough beds in target room!', 16, 1)
+		RETURN
+	END
+
+	UPDATE Trips SET RoomId = @targetRoomId
+	WHERE Id = @TripId
+END
+GO
+
+CREATE TRIGGER tr_CancelTrip ON Trips INSTEAD OF DELETE
+AS
+UPDATE Trips SET CancelDate = GETDATE()
+FROM deleted
+WHERE deleted.CancelDate IS NULL AND deleted.Id = Trips.Id
