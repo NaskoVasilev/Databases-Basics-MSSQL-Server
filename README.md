@@ -17,4 +17,4 @@ Course Databases Basics MSSQL Server  January 2019 - SoftUni.
 
 8. Triggers and Transactions
 
-Final exam: 17 February 2019 - 100/100 Points
+Final exam: 17 February 2019 - 100/100 points
